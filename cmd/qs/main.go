@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"quantumshield/internal/analyzer/githistory"
 	"quantumshield/internal/monitor"
 	"quantumshield/internal/reporter"
 	"quantumshield/internal/scanner"
@@ -26,6 +27,7 @@ func main() {
 	root.AddCommand(scanCmd())
 	root.AddCommand(monitorCmd())
 	root.AddCommand(serveCmd())
+	root.AddCommand(installHookCmd())
 	root.AddCommand(versionCmd())
 
 	if err := root.Execute(); err != nil {
@@ -201,6 +203,22 @@ func versionCmd() *cobra.Command {
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Printf("QuantumShield %s\n", version.FullVersion())
+		},
+	}
+}
+
+func installHookCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install-hook",
+		Short: "Install a git pre-commit hook for quantum-safe scanning",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			hookScript := githistory.GeneratePreCommitHook()
+			hookPath := ".git/hooks/pre-commit"
+			if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
+				return fmt.Errorf("failed to write hook: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "  Pre-commit hook installed at %s\n", hookPath)
+			return nil
 		},
 	}
 }

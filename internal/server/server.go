@@ -14,8 +14,8 @@ import (
 	"quantumshield/internal/monitor"
 	"quantumshield/internal/reporter"
 	"quantumshield/internal/scanner"
+	"quantumshield/internal/store"
 	"quantumshield/pkg/crypto"
-	"quantumshield/pkg/models"
 	"quantumshield/pkg/version"
 )
 
@@ -23,7 +23,7 @@ type Server struct {
 	scanner  *scanner.Scanner
 	monitor  *monitor.Monitor
 	reporter *reporter.Reporter
-	scans    []models.ScanResult
+	store    store.Store
 	mu       sync.RWMutex
 }
 
@@ -60,10 +60,21 @@ func Run(cfg Config) error {
 		return err
 	}
 
+	// Initialize persistent store
+	dbPath := os.Getenv("QS_DB_PATH")
+	if dbPath == "" {
+		dbPath = "quantumshield.db"
+	}
+	dataStore := store.NewSQLiteStore(dbPath)
+	if err := dataStore.Init(context.Background()); err != nil {
+		log.Printf("Warning: SQLite init failed, using memory store: %v", err)
+	}
+
 	srv := &Server{
 		scanner:  s,
 		monitor:  mon,
 		reporter: reporter.New("json"),
+		store:    dataStore,
 	}
 
 	mux := http.NewServeMux()
@@ -71,6 +82,7 @@ func Run(cfg Config) error {
 	mux.HandleFunc("/", srv.handleRoot)
 	mux.HandleFunc("/api/v1/scan", srv.handleScan)
 	mux.HandleFunc("/api/v1/scans", srv.handleListScans)
+	mux.HandleFunc("/api/v1/trend", srv.handleTrend)
 	mux.HandleFunc("/api/v1/monitor/status", srv.handleMonitorStatus)
 	mux.HandleFunc("/api/v1/monitor/latest", srv.handleMonitorLatest)
 	mux.HandleFunc("/api/v1/algorithms", srv.handleAlgorithms)
@@ -127,6 +139,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			"GET  /health",
 			"POST /api/v1/scan",
 			"GET  /api/v1/scans",
+			"GET  /api/v1/trend?days=30",
 			"GET  /api/v1/monitor/status",
 			"GET  /api/v1/monitor/latest",
 			"GET  /api/v1/algorithms",
@@ -162,30 +175,49 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		req.Path = "."
 	}
 	result, err := s.scanner.Scan(r.Context(), scanner.ScanOptions{
-		TargetPath:  req.Path,
-		Languages:   req.Languages,
-		ScanConfigs: true,
+		TargetPath:       req.Path,
+		Languages:        req.Languages,
+		ScanConfigs:      true,
+		ScanCertificates: true,
+		ScanDependencies: true,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	s.mu.Lock()
-	s.scans = append(s.scans, *result)
-	if len(s.scans) > 100 {
-		s.scans = s.scans[len(s.scans)-100:]
+	// Persist to store
+	if s.store != nil {
+		if err := s.store.SaveScan(r.Context(), result); err != nil {
+			log.Printf("Failed to persist scan: %v", err)
+		}
 	}
-	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleListScans(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"count": len(s.scans),
-		"scans": s.scans,
-	})
+	if s.store != nil {
+		scans, err := s.store.ListScans(r.Context(), 50)
+		if err == nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"count": len(scans),
+				"scans": scans,
+			})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"count": 0, "scans": []interface{}{}})
+}
+
+func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
+	days := 30
+	if s.store != nil {
+		trend, err := s.store.GetTrend(r.Context(), days)
+		if err == nil {
+			writeJSON(w, http.StatusOK, trend)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, []interface{}{})
 }
 
 func (s *Server) handleMonitorStatus(w http.ResponseWriter, r *http.Request) {

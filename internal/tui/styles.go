@@ -158,7 +158,92 @@ var (
 	// Separator
 	separatorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#374151"))
+
+	// Finding list highlight (cursor selection)
+	findingHighlightStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#1E3A5F")).
+				Foreground(textColor)
+
+	// Detail view styles
+	detailLabelStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(secondaryColor).
+				Width(20)
+
+	detailValueStyle = lipgloss.NewStyle().
+				Foreground(textColor)
+
+	// Diff styles
+	diffAddStyle = lipgloss.NewStyle().
+			Foreground(accentColor)
+
+	diffDelStyle = lipgloss.NewStyle().
+			Foreground(dangerColor)
+
+	diffHeaderStyle = lipgloss.NewStyle().
+			Foreground(secondaryColor).
+			Bold(true)
+
+	// Code snippet display
+	codeLineStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#9CA3AF"))
+
+	codeHighlightLineStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F9FAFB")).
+				Background(lipgloss.Color("#7C3AED")).
+				Bold(true)
+
+	codeLineNumStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#4B5563")).
+				Width(6).
+				Align(lipgloss.Right)
+
+	// Badge styles
+	badgeCriticalStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(dangerColor).
+				Bold(true).
+				Padding(0, 1)
+
+	badgeHighStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#000000")).
+			Background(warningColor).
+			Bold(true).
+			Padding(0, 1)
+
+	badgeMediumStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#000000")).
+				Background(lipgloss.Color("#F59E0B")).
+				Padding(0, 1)
+
+	badgeLowStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#000000")).
+			Background(secondaryColor).
+			Padding(0, 1)
+
+	// Info box for detail view
+	infoBoxStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#374151")).
+			Padding(1, 2).
+			MarginTop(1).
+			MarginBottom(1)
 )
+
+func severityBadge(sev string) string {
+	switch sev {
+	case "CRITICAL":
+		return badgeCriticalStyle.Render(" CRITICAL ")
+	case "HIGH":
+		return badgeHighStyle.Render(" HIGH ")
+	case "MEDIUM":
+		return badgeMediumStyle.Render(" MEDIUM ")
+	case "LOW":
+		return badgeLowStyle.Render(" LOW ")
+	default:
+		return sev
+	}
+}
 
 func severityStyle(sev string) lipgloss.Style {
 	switch sev {

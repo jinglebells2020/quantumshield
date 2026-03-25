@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"quantumshield/internal/analyzer/certscanner"
+	"quantumshield/internal/analyzer/depgraph"
+	"quantumshield/internal/analyzer/goast"
 	"quantumshield/internal/rules"
 	"quantumshield/pkg/crypto"
 	"quantumshield/pkg/models"
@@ -115,6 +118,49 @@ func (s *Scanner) Scan(ctx context.Context, opts ScanOptions) (*models.ScanResul
 		allFindings = append(allFindings, f)
 	}
 
+	// Phase 2: Go AST deep analysis (higher confidence than regex)
+	goASTAnalyzer := goast.New()
+	for _, f := range files {
+		if f.language == "go" {
+			content, err := os.ReadFile(f.path)
+			if err != nil {
+				continue
+			}
+			astFindings, _ := goASTAnalyzer.AnalyzeFile(f.path, content)
+			for i := range astFindings {
+				astFindings[i].ScanID = result.ID
+			}
+			allFindings = append(allFindings, astFindings...)
+		}
+	}
+
+	// Phase 3: Certificate scanning
+	if opts.ScanCertificates {
+		cs := certscanner.NewCertScanner()
+		certFindings, err := cs.ScanDirectory(opts.TargetPath)
+		if err == nil {
+			for i := range certFindings {
+				certFindings[i].ScanID = result.ID
+			}
+			allFindings = append(allFindings, certFindings...)
+		}
+	}
+
+	// Phase 4: Dependency analysis
+	if opts.ScanDependencies {
+		da := depgraph.NewDepAnalyzer()
+		_, depFindings, err := da.Analyze(opts.TargetPath)
+		if err == nil {
+			for i := range depFindings {
+				depFindings[i].ScanID = result.ID
+			}
+			allFindings = append(allFindings, depFindings...)
+		}
+	}
+
+	// Deduplicate findings (prefer higher confidence)
+	allFindings = deduplicateFindings(allFindings)
+
 	result.Findings = allFindings
 	result.Status = "completed"
 	result.CompletedAt = time.Now()
@@ -125,6 +171,26 @@ func (s *Scanner) Scan(ctx context.Context, opts ScanOptions) (*models.ScanResul
 	result.Summary = buildSummary(allFindings)
 
 	return result, nil
+}
+
+// deduplicateFindings removes duplicate findings, keeping the one with higher confidence.
+func deduplicateFindings(findings []models.Finding) []models.Finding {
+	best := make(map[string]models.Finding)
+	for _, f := range findings {
+		key := fmt.Sprintf("%s:%d:%s", f.FilePath, f.LineStart, f.RuleID)
+		if existing, ok := best[key]; ok {
+			if f.Confidence > existing.Confidence {
+				best[key] = f
+			}
+		} else {
+			best[key] = f
+		}
+	}
+	result := make([]models.Finding, 0, len(best))
+	for _, f := range best {
+		result = append(result, f)
+	}
+	return result
 }
 
 type fileEntry struct {

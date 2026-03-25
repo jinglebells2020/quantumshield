@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"quantumshield/internal/reporter"
 	"quantumshield/internal/scanner"
 	"quantumshield/pkg/crypto"
 	"quantumshield/pkg/models"
@@ -26,6 +30,7 @@ const (
 	viewFindings
 	viewMonitor
 	viewHelp
+	viewFindingDetail
 )
 
 type scanResultMsg struct {
@@ -49,6 +54,7 @@ type Model struct {
 	viewport viewport.Model
 
 	activeView      view
+	previousView    view
 	scanner         *scanner.Scanner
 	lastResult      *models.ScanResult
 	prevResult      *models.ScanResult
@@ -61,6 +67,14 @@ type Model struct {
 	// history of commands
 	history    []string
 	historyIdx int
+
+	// finding navigation
+	selectedIdx    int
+	inputFocused   bool
+	cachedFindings []models.Finding // sorted + deduped findings cache
+
+	// scan history
+	scanHistory []scanHistoryEntry
 
 	// monitor stats
 	scanCount     int
@@ -75,6 +89,14 @@ type Model struct {
 	statusTime time.Time
 
 	ready bool
+}
+
+type scanHistoryEntry struct {
+	path      string
+	timestamp time.Time
+	findings  int
+	duration  int64
+	readiness float64
 }
 
 func NewModel() Model {
@@ -98,6 +120,8 @@ func NewModel() Model {
 		alerts:          []string{},
 		startedAt:       time.Now(),
 		monitorInterval: 30 * time.Second,
+		inputFocused:    true,
+		selectedIdx:     0,
 	}
 }
 
@@ -138,27 +162,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "esc":
+			if m.activeView == viewFindingDetail {
+				m.activeView = viewFindings
+				m.viewport.SetContent(m.renderViewContent())
+				m.viewport.GotoTop()
+				return m, nil
+			}
+			// Unfocus input if focused
+			if m.inputFocused {
+				m.inputFocused = false
+				m.input.Blur()
+				return m, nil
+			}
 		case "tab":
+			if m.activeView == viewFindingDetail {
+				m.activeView = viewFindings
+			}
 			m.activeView = (m.activeView + 1) % 4
 			m.viewport.SetContent(m.renderViewContent())
 			m.viewport.GotoTop()
 			return m, nil
 		case "shift+tab":
+			if m.activeView == viewFindingDetail {
+				m.activeView = viewFindings
+			}
 			m.activeView = (m.activeView + 3) % 4
 			m.viewport.SetContent(m.renderViewContent())
 			m.viewport.GotoTop()
 			return m, nil
 		case "enter":
-			cmd := strings.TrimSpace(m.input.Value())
-			if cmd != "" {
-				m.history = append(m.history, cmd)
-				m.historyIdx = len(m.history)
-				m.input.SetValue("")
-				return m.executeCommand(cmd)
+			if m.inputFocused {
+				cmd := strings.TrimSpace(m.input.Value())
+				if cmd != "" {
+					m.history = append(m.history, cmd)
+					m.historyIdx = len(m.history)
+					m.input.SetValue("")
+					return m.executeCommand(cmd)
+				}
+				return m, nil
+			}
+			// Open finding detail if on findings view
+			if m.activeView == viewFindings && len(m.cachedFindings) > 0 {
+				m.previousView = viewFindings
+				m.activeView = viewFindingDetail
+				m.viewport.SetContent(m.renderViewContent())
+				m.viewport.GotoTop()
+				return m, nil
 			}
 			return m, nil
-		case "up":
-			if m.input.Focused() && len(m.history) > 0 {
+		case "up", "k":
+			if m.inputFocused && msg.String() == "up" && len(m.history) > 0 {
 				if m.historyIdx > 0 {
 					m.historyIdx--
 					m.input.SetValue(m.history[m.historyIdx])
@@ -166,8 +220,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-		case "down":
-			if m.input.Focused() && len(m.history) > 0 {
+			if !m.inputFocused && (m.activeView == viewFindings || m.activeView == viewFindingDetail) {
+				if m.selectedIdx > 0 {
+					m.selectedIdx--
+					if m.activeView == viewFindingDetail {
+						m.viewport.SetContent(m.renderViewContent())
+						m.viewport.GotoTop()
+					} else {
+						m.viewport.SetContent(m.renderViewContent())
+					}
+				}
+				return m, nil
+			}
+		case "down", "j":
+			if m.inputFocused && msg.String() == "down" && len(m.history) > 0 {
 				if m.historyIdx < len(m.history)-1 {
 					m.historyIdx++
 					m.input.SetValue(m.history[m.historyIdx])
@@ -178,34 +244,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if !m.inputFocused && (m.activeView == viewFindings || m.activeView == viewFindingDetail) {
+				if len(m.cachedFindings) > 0 && m.selectedIdx < len(m.cachedFindings)-1 {
+					m.selectedIdx++
+					if m.activeView == viewFindingDetail {
+						m.viewport.SetContent(m.renderViewContent())
+						m.viewport.GotoTop()
+					} else {
+						m.viewport.SetContent(m.renderViewContent())
+					}
+				}
+				return m, nil
+			}
 		case "ctrl+l":
 			m.lastResult = nil
 			m.alerts = nil
+			m.cachedFindings = nil
+			m.selectedIdx = 0
 			m.viewport.SetContent(m.renderViewContent())
 			return m, nil
+		case "f":
+			if !m.inputFocused {
+				m.inputFocused = true
+				m.input.Focus()
+				return m, textinput.Blink
+			}
+		case "/":
+			if !m.inputFocused {
+				m.inputFocused = true
+				m.input.Focus()
+				m.input.SetValue("")
+				return m, textinput.Blink
+			}
 		case "1":
-			if !m.input.Focused() {
+			if !m.inputFocused {
 				m.activeView = viewDashboard
 				m.viewport.SetContent(m.renderViewContent())
 				m.viewport.GotoTop()
 				return m, nil
 			}
 		case "2":
-			if !m.input.Focused() {
+			if !m.inputFocused {
 				m.activeView = viewFindings
 				m.viewport.SetContent(m.renderViewContent())
 				m.viewport.GotoTop()
 				return m, nil
 			}
 		case "3":
-			if !m.input.Focused() {
+			if !m.inputFocused {
 				m.activeView = viewMonitor
 				m.viewport.SetContent(m.renderViewContent())
 				m.viewport.GotoTop()
 				return m, nil
 			}
 		case "4", "?":
-			if !m.input.Focused() {
+			if !m.inputFocused {
 				m.activeView = viewHelp
 				m.viewport.SetContent(m.renderViewContent())
 				m.viewport.GotoTop()
@@ -225,6 +318,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastScanAt = time.Now()
 			m.statusMsg = fmt.Sprintf("Scan complete: %d findings in %dms", msg.result.Summary.TotalFindings, msg.result.DurationMs)
 			m.statusTime = time.Now()
+			m.rebuildFindingsCache()
+			m.selectedIdx = 0
+			// Record scan history
+			m.scanHistory = append(m.scanHistory, scanHistoryEntry{
+				path:      m.scanPath,
+				timestamp: time.Now(),
+				findings:  msg.result.Summary.TotalFindings,
+				duration:  msg.result.DurationMs,
+				readiness: msg.result.Summary.QuantumReadiness,
+			})
 			if m.activeView == viewDashboard || m.activeView == viewFindings {
 				m.viewport.SetContent(m.renderViewContent())
 			}
@@ -299,6 +402,219 @@ func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.renderViewContent())
 		return m, m.doScan(path)
 
+	case "detail", "d":
+		if len(parts) > 1 {
+			n, err := strconv.Atoi(parts[1])
+			if err != nil || n < 1 {
+				// "d" without a number or "dash"/"dashboard" — go to dashboard
+				if parts[0] == "d" && len(parts) == 1 {
+					m.activeView = viewDashboard
+					m.viewport.SetContent(m.renderViewContent())
+					m.viewport.GotoTop()
+					return m, nil
+				}
+				m.statusMsg = fmt.Sprintf("Invalid finding number: %s", parts[1])
+				m.statusTime = time.Now()
+				return m, nil
+			}
+			if len(m.cachedFindings) == 0 {
+				m.statusMsg = "No findings available. Run a scan first."
+				m.statusTime = time.Now()
+				return m, nil
+			}
+			if n > len(m.cachedFindings) {
+				m.statusMsg = fmt.Sprintf("Finding %d does not exist (max: %d)", n, len(m.cachedFindings))
+				m.statusTime = time.Now()
+				return m, nil
+			}
+			m.selectedIdx = n - 1
+			m.previousView = m.activeView
+			m.activeView = viewFindingDetail
+			m.viewport.SetContent(m.renderViewContent())
+			m.viewport.GotoTop()
+			return m, nil
+		}
+		// "d" alone -> dashboard, "detail" alone -> show current selected
+		if parts[0] == "d" {
+			m.activeView = viewDashboard
+			m.viewport.SetContent(m.renderViewContent())
+			m.viewport.GotoTop()
+			return m, nil
+		}
+		// "detail" alone -> show currently selected finding
+		if len(m.cachedFindings) > 0 {
+			m.previousView = m.activeView
+			m.activeView = viewFindingDetail
+			m.viewport.SetContent(m.renderViewContent())
+			m.viewport.GotoTop()
+		} else {
+			m.statusMsg = "No findings available. Run a scan first."
+			m.statusTime = time.Now()
+		}
+		return m, nil
+
+	case "fix":
+		if len(parts) < 2 {
+			m.statusMsg = "Usage: fix <n>"
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		n, err := strconv.Atoi(parts[1])
+		if err != nil || n < 1 {
+			m.statusMsg = fmt.Sprintf("Invalid finding number: %s", parts[1])
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		if len(m.cachedFindings) == 0 {
+			m.statusMsg = "No findings available. Run a scan first."
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		if n > len(m.cachedFindings) {
+			m.statusMsg = fmt.Sprintf("Finding %d does not exist (max: %d)", n, len(m.cachedFindings))
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		f := m.cachedFindings[n-1]
+		if f.FixDiff == "" {
+			m.statusMsg = fmt.Sprintf("No fix diff available for finding %d (%s)", n, f.Algorithm)
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		// Jump to detail view which shows the diff
+		m.selectedIdx = n - 1
+		m.previousView = m.activeView
+		m.activeView = viewFindingDetail
+		m.viewport.SetContent(m.renderViewContent())
+		m.viewport.GotoTop()
+		m.statusMsg = fmt.Sprintf("Showing fix preview for finding %d", n)
+		m.statusTime = time.Now()
+		return m, nil
+
+	case "apply":
+		if len(parts) < 2 {
+			m.statusMsg = "Usage: apply <n>"
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		n, err := strconv.Atoi(parts[1])
+		if err != nil || n < 1 {
+			m.statusMsg = fmt.Sprintf("Invalid finding number: %s", parts[1])
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		if len(m.cachedFindings) == 0 {
+			m.statusMsg = "No findings available. Run a scan first."
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		if n > len(m.cachedFindings) {
+			m.statusMsg = fmt.Sprintf("Finding %d does not exist (max: %d)", n, len(m.cachedFindings))
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		f := m.cachedFindings[n-1]
+		if f.FixDiff == "" || !f.AutoFixAvailable {
+			m.statusMsg = fmt.Sprintf("No auto-fix available for finding %d (%s)", n, f.Algorithm)
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		// Apply the fix by writing the replacement
+		applyErr := applyFix(f)
+		if applyErr != nil {
+			m.statusMsg = fmt.Sprintf("Failed to apply fix: %v", applyErr)
+		} else {
+			m.statusMsg = fmt.Sprintf("Fix applied for finding %d (%s) in %s", n, f.Algorithm, f.FilePath)
+		}
+		m.statusTime = time.Now()
+		return m, nil
+
+	case "export":
+		if len(parts) < 3 {
+			m.statusMsg = "Usage: export json <file> | export sarif <file>"
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		if m.lastResult == nil {
+			m.statusMsg = "No scan results to export. Run a scan first."
+			m.statusTime = time.Now()
+			return m, nil
+		}
+		format := parts[1]
+		outPath := parts[2]
+		switch format {
+		case "json":
+			r := reporter.New("json")
+			if err := r.WriteFile(m.lastResult, outPath); err != nil {
+				m.statusMsg = fmt.Sprintf("Export error: %v", err)
+			} else {
+				m.statusMsg = fmt.Sprintf("Exported JSON to %s", outPath)
+			}
+		case "sarif":
+			r := reporter.New("sarif")
+			if err := r.WriteFile(m.lastResult, outPath); err != nil {
+				m.statusMsg = fmt.Sprintf("Export error: %v", err)
+			} else {
+				m.statusMsg = fmt.Sprintf("Exported SARIF to %s", outPath)
+			}
+		default:
+			m.statusMsg = fmt.Sprintf("Unknown export format: %s (use json or sarif)", format)
+		}
+		m.statusTime = time.Now()
+		return m, nil
+
+	case "history":
+		m.activeView = viewHelp // reuse help viewport to show history
+		var sb strings.Builder
+		sb.WriteString(headingStyle.Render("Scan History"))
+		sb.WriteString("\n\n")
+		if len(m.scanHistory) == 0 {
+			sb.WriteString("  No scans recorded yet.\n")
+		} else {
+			sb.WriteString(fmt.Sprintf("  %-4s %-20s %-30s %-10s %-10s %s\n", "#", "TIME", "PATH", "FINDINGS", "DURATION", "READINESS"))
+			sb.WriteString(separatorStyle.Render("  " + strings.Repeat("─", 90)))
+			sb.WriteString("\n")
+			for i, h := range m.scanHistory {
+				sb.WriteString(fmt.Sprintf("  %-4d %-20s %-30s %-10d %-10s %.0f/100\n",
+					i+1,
+					h.timestamp.Format("2006-01-02 15:04:05"),
+					truncate(h.path, 29),
+					h.findings,
+					fmt.Sprintf("%dms", h.duration),
+					h.readiness,
+				))
+			}
+		}
+		m.viewport.SetContent(sb.String())
+		m.viewport.GotoTop()
+		return m, nil
+
+	case "certs":
+		path := "."
+		if len(parts) > 1 {
+			path = parts[1]
+		}
+		m.scanning = true
+		m.scanPath = path
+		m.statusMsg = fmt.Sprintf("Scanning certificates in %s...", path)
+		m.statusTime = time.Now()
+		m.activeView = viewFindings
+		m.viewport.SetContent(m.renderViewContent())
+		return m, m.doCertScan(path)
+
+	case "deps":
+		path := "."
+		if len(parts) > 1 {
+			path = parts[1]
+		}
+		m.scanning = true
+		m.scanPath = path
+		m.statusMsg = fmt.Sprintf("Analyzing dependencies in %s...", path)
+		m.statusTime = time.Now()
+		m.activeView = viewFindings
+		m.viewport.SetContent(m.renderViewContent())
+		return m, m.doDepScan(path)
+
 	case "monitor", "mon", "m":
 		path := "."
 		if len(parts) > 1 {
@@ -341,16 +657,18 @@ func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.alerts = nil
 		m.lastResult = nil
 		m.prevResult = nil
+		m.cachedFindings = nil
+		m.selectedIdx = 0
 		m.viewport.SetContent(m.renderViewContent())
 		return m, nil
 
-	case "dashboard", "dash", "d":
+	case "dashboard", "dash":
 		m.activeView = viewDashboard
 		m.viewport.SetContent(m.renderViewContent())
 		m.viewport.GotoTop()
 		return m, nil
 
-	case "findings", "f":
+	case "findings":
 		m.activeView = viewFindings
 		m.viewport.SetContent(m.renderViewContent())
 		m.viewport.GotoTop()
@@ -502,11 +820,20 @@ func (m *Model) renderTabs() string {
 	var rendered []string
 
 	for i, tab := range tabs {
-		if view(i) == m.activeView {
+		isActive := view(i) == m.activeView
+		// In detail view, highlight the Findings tab
+		if m.activeView == viewFindingDetail && view(i) == viewFindings {
+			isActive = true
+		}
+		if isActive {
 			rendered = append(rendered, activeTabStyle.Render(tab))
 		} else {
 			rendered = append(rendered, inactiveTabStyle.Render(tab))
 		}
+	}
+
+	if m.activeView == viewFindingDetail {
+		rendered = append(rendered, activeTabStyle.Render("Detail"))
 	}
 
 	return "  " + strings.Join(rendered, " ")
@@ -522,6 +849,8 @@ func (m *Model) renderViewContent() string {
 		return m.renderMonitorView()
 	case viewHelp:
 		return m.renderHelp()
+	case viewFindingDetail:
+		return m.renderFindingDetail()
 	default:
 		return ""
 	}
@@ -603,29 +932,88 @@ func (m *Model) renderDashboard() string {
 		for lang, count := range r.Summary.ByLanguage {
 			s.WriteString(fmt.Sprintf("  %-14s %d findings\n", lang, count))
 		}
+		s.WriteString("\n")
+	}
+
+	// Migration estimate (Monte Carlo style)
+	autofix := 0
+	manual := 0
+	for _, f := range r.Findings {
+		if f.AutoFixAvailable {
+			autofix++
+		} else {
+			manual++
+		}
+	}
+	if r.Summary.TotalFindings > 0 {
+		s.WriteString(headingStyle.Render("Migration Estimate"))
+		s.WriteString("\n\n")
+		// Rough P50/P90 estimate based on findings count and effort distribution
+		p50Hours := float64(autofix)*0.5 + float64(manual)*4
+		p90Hours := float64(autofix)*1.0 + float64(manual)*8
+		p50Weeks := p50Hours / 40.0
+		p90Weeks := p90Hours / 40.0
+		if p50Weeks < 0.1 {
+			p50Weeks = 0.1
+		}
+		if p90Weeks < 0.1 {
+			p90Weeks = 0.1
+		}
+		s.WriteString(fmt.Sprintf("  Migration estimate: P50 = %.1f weeks, P90 = %.1f weeks\n", p50Weeks, p90Weeks))
+		s.WriteString(fmt.Sprintf("  Auto-fixable: %d | Manual: %d\n\n", autofix, manual))
+	}
+
+	// HNDL risk summary
+	criticalShor := 0
+	for _, f := range r.Findings {
+		if f.QuantumThreat == models.ThreatBrokenByShor && f.Severity == models.SeverityCritical {
+			criticalShor++
+		}
+	}
+	if criticalShor > 0 {
+		s.WriteString(headingStyle.Render("HNDL Risk"))
+		s.WriteString("\n\n")
+		s.WriteString(fmt.Sprintf("  %s critical HNDL findings (harvest-now, decrypt-later)\n\n",
+			criticalStyle.Render(fmt.Sprintf("%d", criticalShor))))
+	}
+
+	// Dependency count
+	depFindings := 0
+	for _, f := range r.Findings {
+		if f.InDependency {
+			depFindings++
+		}
+	}
+	if depFindings > 0 {
+		s.WriteString(headingStyle.Render("Dependency Risk"))
+		s.WriteString("\n\n")
+		s.WriteString(fmt.Sprintf("  %d dependencies with crypto findings\n\n", depFindings))
+	}
+
+	// Certificate summary
+	certFindings := 0
+	for _, f := range r.Findings {
+		if f.Category == models.CategoryCertificate {
+			certFindings++
+		}
+	}
+	if certFindings > 0 {
+		s.WriteString(headingStyle.Render("Certificate Risk"))
+		s.WriteString("\n\n")
+		s.WriteString(fmt.Sprintf("  %d certificates expiring with quantum-vulnerable algorithms\n\n", certFindings))
 	}
 
 	return s.String()
 }
 
-func (m *Model) renderFindings() string {
-	var s strings.Builder
-
-	if m.scanning {
-		s.WriteString("\n  Scanning " + m.scanPath + "...\n")
-		return s.String()
-	}
-
+func (m *Model) rebuildFindingsCache() {
 	if m.lastResult == nil {
-		s.WriteString("\n  No scan results yet. Run: scan <path>\n")
-		return s.String()
+		m.cachedFindings = nil
+		return
 	}
+	findings := make([]models.Finding, len(m.lastResult.Findings))
+	copy(findings, m.lastResult.Findings)
 
-	r := m.lastResult
-	findings := make([]models.Finding, len(r.Findings))
-	copy(findings, r.Findings)
-
-	// Sort and dedup
 	sort.Slice(findings, func(i, j int) bool {
 		if findings[i].Severity != findings[j].Severity {
 			return findings[i].Severity < findings[j].Severity
@@ -641,22 +1029,46 @@ func (m *Model) renderFindings() string {
 			deduped = append(deduped, f)
 		}
 	}
-	findings = deduped
+	m.cachedFindings = deduped
+}
 
+func (m *Model) renderFindings() string {
+	var s strings.Builder
+
+	if m.scanning {
+		s.WriteString("\n  Scanning " + m.scanPath + "...\n")
+		return s.String()
+	}
+
+	if m.lastResult == nil {
+		s.WriteString("\n  No scan results yet. Run: scan <path>\n")
+		return s.String()
+	}
+
+	if len(m.cachedFindings) == 0 {
+		m.rebuildFindingsCache()
+	}
+	findings := m.cachedFindings
+
+	navHint := ""
+	if !m.inputFocused {
+		navHint = mutedStyle("  [j/k: navigate, Enter: detail, f: focus input]")
+	}
 	s.WriteString(headingStyle.Render(fmt.Sprintf("Findings (%d)", len(findings))))
+	s.WriteString(navHint)
 	s.WriteString("\n\n")
 
 	// Table header
-	hdr := fmt.Sprintf("  %-10s %-26s %-38s %-8s %s", "SEVERITY", "ALGORITHM", "LOCATION", "THREAT", "REPLACEMENT")
+	hdr := fmt.Sprintf("  %-4s %-10s %-24s %-36s %-8s %s", "#", "SEVERITY", "ALGORITHM", "LOCATION", "THREAT", "REPLACEMENT")
 	s.WriteString(subheadingStyle.Render(hdr))
 	s.WriteString("\n")
 	s.WriteString(separatorStyle.Render("  " + strings.Repeat("─", m.width-8)))
 	s.WriteString("\n")
 
-	for _, f := range findings {
+	for i, f := range findings {
 		sev := severityStyle(f.Severity.String()).Render(fmt.Sprintf("%-10s", f.Severity.String()))
-		algo := fmt.Sprintf("%-26s", truncate(f.Algorithm, 25))
-		loc := fmt.Sprintf("%-38s", truncate(shortenPath(f.FilePath)+fmt.Sprintf(":%d", f.LineStart), 37))
+		algo := fmt.Sprintf("%-24s", truncate(f.Algorithm, 23))
+		loc := fmt.Sprintf("%-36s", truncate(shortenPath(f.FilePath)+fmt.Sprintf(":%d", f.LineStart), 35))
 		threat := fmt.Sprintf("%-8s", f.QuantumThreat.String())
 
 		replacement := f.ReplacementAlgo
@@ -665,7 +1077,15 @@ func (m *Model) renderFindings() string {
 		}
 		replacement = truncate(replacement, 25)
 
-		s.WriteString(fmt.Sprintf("  %s %s %s %s %s\n", sev, algo, loc, threat, replacement))
+		idx := fmt.Sprintf("%-4d", i+1)
+		row := fmt.Sprintf("  %s %s %s %s %s %s", idx, sev, algo, loc, threat, replacement)
+
+		if i == m.selectedIdx && !m.inputFocused {
+			s.WriteString(findingHighlightStyle.Render(row))
+		} else {
+			s.WriteString(row)
+		}
+		s.WriteString("\n")
 	}
 
 	return s.String()
@@ -717,6 +1137,183 @@ func (m *Model) renderMonitorView() string {
 	return s.String()
 }
 
+func (m *Model) renderFindingDetail() string {
+	var s strings.Builder
+
+	if len(m.cachedFindings) == 0 || m.selectedIdx >= len(m.cachedFindings) {
+		s.WriteString("\n  No finding selected.\n")
+		return s.String()
+	}
+
+	f := m.cachedFindings[m.selectedIdx]
+
+	// Header with navigation hint
+	s.WriteString(headingStyle.Render(fmt.Sprintf("Finding Detail [%d/%d]", m.selectedIdx+1, len(m.cachedFindings))))
+	s.WriteString(mutedStyle("  [Esc: back, j/k: prev/next finding]"))
+	s.WriteString("\n\n")
+
+	// Algorithm name + severity badge + quantum threat
+	s.WriteString(fmt.Sprintf("  %s  %s  %s\n\n",
+		lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(f.Algorithm),
+		severityBadge(f.Severity.String()),
+		func() string {
+			switch f.QuantumThreat {
+			case models.ThreatBrokenByShor:
+				return criticalStyle.Render("Broken by Shor's algorithm")
+			case models.ThreatWeakenedByGrover:
+				return mediumStyle.Render("Weakened by Grover's algorithm")
+			default:
+				return lowStyle.Render("Not directly threatened")
+			}
+		}(),
+	))
+
+	// File path and line
+	s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("File:"), detailValueStyle.Render(f.FilePath)))
+	s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Line:"), detailValueStyle.Render(fmt.Sprintf("%d-%d", f.LineStart, f.LineEnd))))
+	if f.Category.String() != "" {
+		s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Category:"), detailValueStyle.Render(f.Category.String())))
+	}
+	if f.Language != "" {
+		s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Language:"), detailValueStyle.Render(f.Language)))
+	}
+	if f.Library != "" {
+		s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Library:"), detailValueStyle.Render(f.Library)))
+	}
+	if f.Description != "" {
+		s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Description:"), detailValueStyle.Render(f.Description)))
+	}
+	s.WriteString("\n")
+
+	// Code snippet with context
+	s.WriteString(headingStyle.Render("  Code"))
+	s.WriteString("\n\n")
+	codeCtx := readCodeContext(f.FilePath, f.LineStart, 5)
+	if codeCtx != "" {
+		s.WriteString(codeCtx)
+	} else if f.CodeSnippet != "" {
+		// Fallback: show the snippet from the finding
+		s.WriteString(fmt.Sprintf("  %s %s\n",
+			codeLineNumStyle.Render(fmt.Sprintf("%d", f.LineStart)),
+			codeHighlightLineStyle.Render(" "+f.CodeSnippet+" ")))
+	}
+	s.WriteString("\n")
+
+	// Replacement and migration
+	s.WriteString(headingStyle.Render("  Migration"))
+	s.WriteString("\n\n")
+	replacement := f.ReplacementAlgo
+	hybrid := ""
+	effort := f.MigrationEffort
+	priority := ""
+	if mig, ok := crypto.GetMigration(f.Algorithm); ok {
+		replacement = mig.To
+		hybrid = mig.Hybrid
+		effort = mig.Effort
+		priority = mig.Priority
+	}
+	s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Replacement:"), detailValueStyle.Render(replacement)))
+	if hybrid != "" {
+		s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Hybrid Path:"), detailValueStyle.Render(hybrid)))
+	}
+	if priority != "" {
+		s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Priority:"), severityStyle(strings.ToUpper(priority)).Render(priority)))
+	}
+	s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Effort:"), detailValueStyle.Render(effort)))
+	if f.AutoFixAvailable {
+		s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Auto-fix:"), scoreHighStyle.Render("Available")))
+	}
+	if f.RecommendedFix != "" {
+		s.WriteString(fmt.Sprintf("  %s %s\n", detailLabelStyle.Render("Recommended Fix:"), detailValueStyle.Render(f.RecommendedFix)))
+	}
+	s.WriteString("\n")
+
+	// Compliance references
+	if len(f.ComplianceRefs) > 0 {
+		s.WriteString(headingStyle.Render("  Compliance"))
+		s.WriteString("\n\n")
+		for _, ref := range f.ComplianceRefs {
+			statusStyle := detailValueStyle
+			if ref.Status == "non_compliant" || ref.Status == "fail" {
+				statusStyle = criticalStyle
+			} else if ref.Status == "compliant" || ref.Status == "pass" {
+				statusStyle = scoreHighStyle
+			}
+			s.WriteString(fmt.Sprintf("  %s %s [%s]\n",
+				detailLabelStyle.Render(ref.Framework+":"),
+				detailValueStyle.Render(ref.Requirement),
+				statusStyle.Render(ref.Status)))
+		}
+		s.WriteString("\n")
+	}
+
+	// Fix diff if available
+	if f.FixDiff != "" {
+		s.WriteString(headingStyle.Render("  Fix Diff"))
+		s.WriteString("\n\n")
+		s.WriteString(renderDiff(f.FixDiff))
+		s.WriteString("\n")
+	}
+
+	return s.String()
+}
+
+func readCodeContext(filePath string, lineStart int, contextLines int) string {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	var lines []string
+	sc := bufio.NewScanner(file)
+	for sc.Scan() {
+		lines = append(lines, sc.Text())
+	}
+	if err := sc.Err(); err != nil {
+		return ""
+	}
+
+	start := lineStart - contextLines - 1
+	if start < 0 {
+		start = 0
+	}
+	end := lineStart + contextLines
+	if end > len(lines) {
+		end = len(lines)
+	}
+
+	var s strings.Builder
+	for i := start; i < end; i++ {
+		lineNum := i + 1
+		numStr := codeLineNumStyle.Render(fmt.Sprintf("%d", lineNum))
+		if lineNum == lineStart {
+			s.WriteString(fmt.Sprintf("  %s %s\n", numStr, codeHighlightLineStyle.Render(" "+lines[i]+" ")))
+		} else {
+			s.WriteString(fmt.Sprintf("  %s %s\n", numStr, codeLineStyle.Render(lines[i])))
+		}
+	}
+	return s.String()
+}
+
+func renderDiff(diff string) string {
+	var s strings.Builder
+	for _, line := range strings.Split(diff, "\n") {
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			s.WriteString("  " + diffAddStyle.Render(line) + "\n")
+		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			s.WriteString("  " + diffDelStyle.Render(line) + "\n")
+		} else if strings.HasPrefix(line, "@@") {
+			s.WriteString("  " + diffHeaderStyle.Render(line) + "\n")
+		} else if strings.HasPrefix(line, "diff") || strings.HasPrefix(line, "---") || strings.HasPrefix(line, "+++") {
+			s.WriteString("  " + diffHeaderStyle.Render(line) + "\n")
+		} else {
+			s.WriteString("  " + codeLineStyle.Render(line) + "\n")
+		}
+	}
+	return s.String()
+}
+
 func (m *Model) renderHelp() string {
 	var s strings.Builder
 
@@ -725,6 +1322,14 @@ func (m *Model) renderHelp() string {
 
 	cmds := []struct{ key, desc string }{
 		{"scan <path>", "Scan a directory for quantum-vulnerable crypto"},
+		{"detail <n> / d <n>", "Show detail for finding #n"},
+		{"fix <n>", "Show fix preview for finding #n"},
+		{"apply <n>", "Apply auto-fix for finding #n (writes to disk)"},
+		{"export json <file>", "Export results to JSON file"},
+		{"export sarif <file>", "Export results to SARIF file"},
+		{"history", "Show scan history summary"},
+		{"certs [path]", "Scan certificates at path"},
+		{"deps [path]", "Analyze dependencies at path"},
 		{"monitor <path>", "Start continuous monitoring with periodic rescans"},
 		{"stop", "Stop active monitoring"},
 		{"interval <dur>", "Set monitor interval (e.g. 30s, 1m, 5m)"},
@@ -744,10 +1349,15 @@ func (m *Model) renderHelp() string {
 
 	keys := []struct{ key, desc string }{
 		{"Tab / Shift+Tab", "Switch between views"},
-		{"↑ / ↓", "Command history / scroll content"},
+		{"j / k (↑ / ↓)", "Navigate findings (when input unfocused)"},
+		{"Enter", "Open finding detail / execute command"},
+		{"Escape", "Go back from detail view / unfocus input"},
+		{"f", "Focus/unfocus command input (toggle)"},
+		{"/", "Focus input and start filter"},
+		{"↑ / ↓", "Command history (when input focused)"},
+		{"1-4", "Jump to view (when input unfocused)"},
 		{"Ctrl+L", "Clear results"},
 		{"Ctrl+C", "Quit"},
-		{"Enter", "Execute command"},
 	}
 
 	for _, k := range keys {
@@ -837,6 +1447,78 @@ func shortenPath(p string) string {
 
 func mutedStyle(s string) string {
 	return lipgloss.NewStyle().Foreground(mutedColor).Render(s)
+}
+
+func applyFix(f models.Finding) error {
+	if f.FixDiff == "" {
+		return fmt.Errorf("no fix diff available")
+	}
+
+	data, err := os.ReadFile(f.FilePath)
+	if err != nil {
+		return fmt.Errorf("reading file: %w", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	if f.LineStart < 1 || f.LineStart > len(lines) {
+		return fmt.Errorf("line %d out of range", f.LineStart)
+	}
+
+	// Parse the diff to extract old/new lines
+	var oldLines, newLines []string
+	for _, line := range strings.Split(f.FixDiff, "\n") {
+		if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			oldLines = append(oldLines, strings.TrimPrefix(line, "-"))
+		} else if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			newLines = append(newLines, strings.TrimPrefix(line, "+"))
+		}
+	}
+
+	if len(oldLines) == 0 || len(newLines) == 0 {
+		return fmt.Errorf("could not parse fix diff")
+	}
+
+	// Simple single-line replacement
+	idx := f.LineStart - 1
+	original := strings.TrimSpace(lines[idx])
+	expected := strings.TrimSpace(oldLines[0])
+	if original != expected {
+		return fmt.Errorf("source line has changed since scan, cannot apply fix safely")
+	}
+
+	// Preserve leading whitespace
+	leading := lines[idx][:len(lines[idx])-len(strings.TrimLeft(lines[idx], " \t"))]
+	lines[idx] = leading + strings.TrimSpace(newLines[0])
+
+	return os.WriteFile(f.FilePath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+func (m *Model) doCertScan(path string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.scanner.Scan(context.Background(), scanner.ScanOptions{
+			TargetPath:       path,
+			ScanConfigs:      true,
+			ScanCertificates: true,
+		})
+		if err != nil {
+			return scanResultMsg{nil, err}
+		}
+		return scanResultMsg{result, nil}
+	}
+}
+
+func (m *Model) doDepScan(path string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.scanner.Scan(context.Background(), scanner.ScanOptions{
+			TargetPath:       path,
+			ScanConfigs:      true,
+			ScanDependencies: true,
+		})
+		if err != nil {
+			return scanResultMsg{nil, err}
+		}
+		return scanResultMsg{result, nil}
+	}
 }
 
 func Run() error {
