@@ -12,6 +12,7 @@ import (
 	"quantumshield/internal/analyzer/githistory"
 	"quantumshield/internal/cbom"
 	"quantumshield/internal/compliance"
+	"quantumshield/internal/integrations/cloud"
 	"quantumshield/internal/monitor"
 	"quantumshield/internal/reporter"
 	"quantumshield/internal/scanner"
@@ -38,6 +39,7 @@ func main() {
 	root.AddCommand(cbomCmd())
 	root.AddCommand(diffCmd())
 	root.AddCommand(complianceCmd())
+	root.AddCommand(cloudCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -519,6 +521,65 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+func cloudCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cloud",
+		Short: "Audit cloud KMS keys for quantum vulnerability",
+	}
+
+	// Subcommands
+	awsCmd := &cobra.Command{
+		Use:   "aws",
+		Short: "Audit AWS KMS keys",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			region, _ := cmd.Flags().GetString("region")
+			result, err := cloud.AuditAWSKMS(region)
+			if err != nil {
+				return err
+			}
+			data, _ := json.MarshalIndent(result, "", "  ")
+			fmt.Println(string(data))
+			return nil
+		},
+	}
+	awsCmd.Flags().String("region", "us-east-1", "AWS region")
+
+	gcpCmd := &cobra.Command{
+		Use:   "gcp",
+		Short: "Audit GCP Cloud KMS keys",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			project, _ := cmd.Flags().GetString("project")
+			result, err := cloud.AuditGCPKMS(project)
+			if err != nil {
+				return err
+			}
+			data, _ := json.MarshalIndent(result, "", "  ")
+			fmt.Println(string(data))
+			return nil
+		},
+	}
+	gcpCmd.Flags().String("project", "", "GCP project ID")
+
+	azureCmd := &cobra.Command{
+		Use:   "azure",
+		Short: "Audit Azure Key Vault keys",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vault, _ := cmd.Flags().GetString("vault")
+			result, err := cloud.AuditAzureKV(vault)
+			if err != nil {
+				return err
+			}
+			data, _ := json.MarshalIndent(result, "", "  ")
+			fmt.Println(string(data))
+			return nil
+		},
+	}
+	azureCmd.Flags().String("vault", "", "Azure Key Vault name")
+
+	cmd.AddCommand(awsCmd, gcpCmd, azureCmd)
+	return cmd
 }
 
 func printBanner() {
