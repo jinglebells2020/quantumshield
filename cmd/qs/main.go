@@ -1,13 +1,17 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"quantumshield/internal/analyzer/githistory"
 	"quantumshield/internal/cbom"
+	"quantumshield/internal/compliance"
 	"quantumshield/internal/monitor"
 	"quantumshield/internal/reporter"
 	"quantumshield/internal/scanner"
@@ -33,6 +37,7 @@ func main() {
 	root.AddCommand(versionCmd())
 	root.AddCommand(cbomCmd())
 	root.AddCommand(diffCmd())
+	root.AddCommand(complianceCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -345,6 +350,175 @@ func diffCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&baseRef, "base", "origin/main", "Git ref to compare against")
 	return cmd
+}
+
+func complianceCmd() *cobra.Command {
+	var framework, format, output string
+
+	cmd := &cobra.Command{
+		Use:   "compliance [path]",
+		Short: "Generate compliance report (CNSA 2.0, NSM-10, EU PQC, PCI DSS)",
+		Long: `Scan a codebase and generate a regulatory compliance report mapping
+findings to one or more frameworks: CNSA 2.0, NSM-10, EU PQC, PCI DSS 4.0.
+
+Use --framework to select a single framework, or omit it for all frameworks.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := "."
+			if len(args) > 0 {
+				target = args[0]
+			}
+
+			printBanner()
+			fmt.Fprintf(os.Stderr, "  Scanning %s for compliance assessment...\n\n", target)
+
+			s, err := scanner.New()
+			if err != nil {
+				return fmt.Errorf("init failed: %w", err)
+			}
+
+			result, err := s.Scan(cmd.Context(), scanner.ScanOptions{
+				TargetPath:       target,
+				ScanConfigs:      true,
+				ScanCertificates: true,
+				ScanDependencies: true,
+			})
+			if err != nil {
+				return fmt.Errorf("scan failed: %w", err)
+			}
+
+			var report interface{}
+			if framework == "" || strings.EqualFold(framework, "all") {
+				report = compliance.GenerateAll(result.Findings)
+			} else {
+				fw, err := compliance.ParseFramework(framework)
+				if err != nil {
+					return err
+				}
+				report = compliance.GenerateReport(result.Findings, fw)
+			}
+
+			switch format {
+			case "json":
+				data, err := compliance.ToJSON(report)
+				if err != nil {
+					return err
+				}
+				if output != "" {
+					if err := os.WriteFile(output, data, 0644); err != nil {
+						return err
+					}
+					fmt.Fprintf(os.Stderr, "  Report written to %s\n", output)
+				} else {
+					fmt.Println(string(data))
+				}
+
+			default: // "table"
+				writeComplianceTable(os.Stdout, report)
+				if output != "" {
+					f, err := os.Create(output)
+					if err != nil {
+						return err
+					}
+					defer f.Close()
+					// Write JSON alongside the table output
+					data, _ := json.MarshalIndent(report, "", "  ")
+					f.Write(data)
+					fmt.Fprintf(os.Stderr, "\n  JSON report written to %s\n", output)
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&framework, "framework", "F", "all", "Framework (cnsa2, nsm-10, eu-pqc, pci-dss, all)")
+	cmd.Flags().StringVarP(&format, "format", "f", "table", "Output format (table, json)")
+	cmd.Flags().StringVarP(&output, "output", "o", "", "Output file path")
+
+	return cmd
+}
+
+func writeComplianceTable(w *os.File, report interface{}) {
+	switch r := report.(type) {
+	case *compliance.ComplianceReport:
+		printComplianceReport(w, r)
+	case *compliance.MultiReport:
+		for i, cr := range r.Reports {
+			if i > 0 {
+				fmt.Fprintf(w, "\n")
+			}
+			printComplianceReport(w, &cr)
+		}
+	}
+}
+
+func printComplianceReport(w *os.File, r *compliance.ComplianceReport) {
+	statusColor := "\033[91m" // red
+	if r.OverallStatus == "compliant" {
+		statusColor = "\033[92m" // green
+	} else if r.OverallStatus == "partially-compliant" {
+		statusColor = "\033[93m" // yellow
+	}
+
+	fmt.Fprintf(w, "  ══════════════════════════════════════════════════════\n")
+	fmt.Fprintf(w, "  %s COMPLIANCE REPORT\n", strings.ToUpper(string(r.Framework)))
+	fmt.Fprintf(w, "  ══════════════════════════════════════════════════════\n")
+	fmt.Fprintf(w, "  Status: %s%s\033[0m  |  Compliance: %.0f%%  |  Blocking: %d\n\n",
+		statusColor, strings.ToUpper(r.OverallStatus), r.CompliancePct, r.BlockingFindings)
+
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintf(tw, "  ID\tSTATUS\tBLOCKING\tDEADLINE\tDESCRIPTION\n")
+	fmt.Fprintf(tw, "  --\t------\t--------\t--------\t-----------\n")
+
+	for _, req := range r.Requirements {
+		status := colorStatus(req.Status)
+		fmt.Fprintf(tw, "  %s\t%s\t%d\t%s\t%s\n",
+			req.ID, status, req.Findings,
+			req.Deadline.Format("2006-01-02"),
+			truncate(req.Description, 50),
+		)
+	}
+	tw.Flush()
+
+	// Actions needed
+	hasActions := false
+	for _, req := range r.Requirements {
+		if req.Status != "compliant" && len(req.Actions) > 0 {
+			if !hasActions {
+				fmt.Fprintf(w, "\n  REQUIRED ACTIONS:\n")
+				hasActions = true
+			}
+			fmt.Fprintf(w, "  [%s]\n", req.ID)
+			for _, a := range req.Actions {
+				fmt.Fprintf(w, "    - %s\n", a)
+			}
+		}
+	}
+
+	fmt.Fprintf(w, "\n  %s\n", r.Summary)
+}
+
+func colorStatus(s string) string {
+	switch s {
+	case "compliant":
+		return "\033[92mPASS\033[0m"
+	case "non-compliant":
+		return "\033[91mFAIL\033[0m"
+	case "in-progress":
+		return "\033[93mWIP \033[0m"
+	case "not-applicable":
+		return "\033[90mN/A \033[0m"
+	default:
+		return s
+	}
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
 }
 
 func printBanner() {
