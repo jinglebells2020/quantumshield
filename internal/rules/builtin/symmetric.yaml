@@ -48,11 +48,45 @@ patterns:
       - 'DES3\.new\('
       - 'algorithms\.TripleDES\('
     message: "3DES in Python — replace with AES-256"
+  - language: java
+    type: regex
+    patterns:
+      - 'Cipher\.getInstance\("DESede'
+      - 'KeyGenerator\.getInstance\("DESede'
+      - 'SecretKeySpec\(.*"DESede"'
+    message: "3DES (DESede) in Java — replace with AES-256"
   - language: javascript
     type: regex
     patterns:
       - "crypto\\.createCipheriv\\(['\"]des-ede3"
     message: "3DES in Node.js — replace with AES-256"
+---
+id: QS-DES-001
+name: DES Cipher
+description: DES uses 56-bit keys and is completely broken
+severity: critical
+quantum_threat: weakened_by_grover
+category: symmetric_encryption
+replacement: AES-256-GCM
+patterns:
+  - language: java
+    type: regex
+    patterns:
+      - 'Cipher\.getInstance\("DES"'
+      - 'KeyGenerator\.getInstance\("DES"'
+      - 'SecretKeySpec\(.*"DES"'
+    message: "DES in Java — 56-bit keys, completely broken, replace with AES-256"
+  - language: go
+    type: regex
+    patterns:
+      - 'des\.NewCipher\('
+    message: "DES usage detected — replace with AES-256"
+  - language: python
+    type: regex
+    patterns:
+      - 'DES\.new\('
+      - 'algorithms\.DES\b'
+    message: "DES in Python — replace with AES-256"
 ---
 id: QS-RC4-001
 name: RC4 Stream Cipher
