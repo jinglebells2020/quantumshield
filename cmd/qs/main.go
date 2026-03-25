@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"quantumshield/internal/analyzer/githistory"
+	"quantumshield/internal/cbom"
 	"quantumshield/internal/monitor"
 	"quantumshield/internal/reporter"
 	"quantumshield/internal/scanner"
@@ -29,6 +31,8 @@ func main() {
 	root.AddCommand(serveCmd())
 	root.AddCommand(installHookCmd())
 	root.AddCommand(versionCmd())
+	root.AddCommand(cbomCmd())
+	root.AddCommand(diffCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -221,6 +225,126 @@ func installHookCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func cbomCmd() *cobra.Command {
+	var (
+		format  string
+		output  string
+		project string
+		version string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "cbom [path]",
+		Short: "Generate a Cryptographic Bill of Materials (CycloneDX v1.6)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := "."
+			if len(args) > 0 {
+				target = args[0]
+			}
+			if project == "" {
+				project = filepath.Base(target)
+			}
+
+			s, err := scanner.New()
+			if err != nil {
+				return err
+			}
+
+			result, err := s.Scan(cmd.Context(), scanner.ScanOptions{
+				TargetPath:       target,
+				ScanConfigs:      true,
+				ScanCertificates: true,
+				ScanDependencies: true,
+			})
+			if err != nil {
+				return err
+			}
+
+			gen := cbom.NewGenerator(project, version)
+			bom := gen.Generate(result.Findings)
+
+			var out []byte
+			switch format {
+			case "csv":
+				out = []byte(gen.ToCSV(bom))
+			default:
+				out, err = gen.ToJSON(bom)
+				if err != nil {
+					return err
+				}
+			}
+
+			if output != "" {
+				return os.WriteFile(output, out, 0644)
+			}
+			fmt.Print(string(out))
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&format, "format", "f", "json", "Output format (json, csv)")
+	cmd.Flags().StringVarP(&output, "output", "o", "", "Output file path")
+	cmd.Flags().StringVar(&project, "project", "", "Project name")
+	cmd.Flags().StringVar(&version, "version", "", "Project version")
+
+	return cmd
+}
+
+func diffCmd() *cobra.Command {
+	var baseRef string
+
+	cmd := &cobra.Command{
+		Use:   "diff [path]",
+		Short: "Show new/fixed findings since last baseline scan",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := "."
+			if len(args) > 0 {
+				target = args[0]
+			}
+
+			bs := scanner.NewBaselineStore(target)
+			baseline, err := bs.Load()
+			if err != nil {
+				return err
+			}
+			if baseline == nil {
+				fmt.Fprintln(os.Stderr, "No baseline found. Run 'qs scan --save-baseline' first.")
+				return nil
+			}
+
+			s, err := scanner.New()
+			if err != nil {
+				return err
+			}
+
+			result, err := s.Scan(cmd.Context(), scanner.ScanOptions{
+				TargetPath:  target,
+				ScanConfigs: true,
+			})
+			if err != nil {
+				return err
+			}
+
+			diff := scanner.ComputeDiff(baseline, result.Findings)
+			fmt.Fprintf(os.Stderr, "\n  New findings:   +%d\n", diff.NewCount)
+			fmt.Fprintf(os.Stderr, "  Fixed findings: -%d\n\n", diff.FixedCount)
+
+			for _, f := range diff.NewFindings {
+				fmt.Fprintf(os.Stderr, "  + [%s] %s at %s:%d\n", f.Severity.String(), f.Algorithm, f.FilePath, f.LineStart)
+			}
+			for _, f := range diff.FixedFindings {
+				fmt.Fprintf(os.Stderr, "  - [%s] %s at %s:%d\n", f.Severity.String(), f.Algorithm, f.FilePath, f.LineStart)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&baseRef, "base", "origin/main", "Git ref to compare against")
+	return cmd
 }
 
 func printBanner() {
