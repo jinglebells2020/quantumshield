@@ -299,6 +299,12 @@ func (s *Scanner) scanFile(ctx context.Context, f fileEntry) ([]models.Finding, 
 		lineNum++
 		line := scanner.Text()
 
+		// Skip lines that are comments, import statements, or blank
+		trimmed := strings.TrimSpace(line)
+		if isNoiseLine(trimmed, f.language) {
+			continue
+		}
+
 		matches := s.engine.MatchLine(f.language, line)
 		for _, match := range matches {
 			finding := models.Finding{
@@ -342,6 +348,37 @@ func inferEffort(r *rules.Rule) string {
 	default:
 		return "low"
 	}
+}
+
+// isNoiseLine returns true for lines that should not trigger regex findings:
+// comments, import-only statements, and documentation strings.
+func isNoiseLine(trimmed string, language string) bool {
+	if trimmed == "" {
+		return true
+	}
+
+	// Comments in all languages
+	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") ||
+		strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, "#") {
+		return true
+	}
+
+	// Go/Java import statements (just importing a package is not a finding)
+	if strings.HasPrefix(trimmed, `"crypto/`) || strings.HasPrefix(trimmed, `import `) {
+		// But allow if the line also has a function call
+		if !strings.Contains(trimmed, "(") {
+			return true
+		}
+	}
+
+	// Python import-only
+	if language == "python" && (strings.HasPrefix(trimmed, "from ") || strings.HasPrefix(trimmed, "import ")) {
+		if !strings.Contains(trimmed, "(") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func buildSummary(findings []models.Finding) models.ScanSummary {
