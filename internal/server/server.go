@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -27,33 +27,37 @@ type Server struct {
 	mu       sync.RWMutex
 }
 
-func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+type Config struct {
+	Port        string
+	WatchPath   string
+	IntervalSec int
+	WebhookURL  string
+}
 
-	watchPath := os.Getenv("QS_WATCH_PATH")
-	if watchPath == "" {
-		watchPath = "."
+func Run(cfg Config) error {
+	if cfg.Port == "" {
+		cfg.Port = "8080"
 	}
-
-	intervalSec := 60
-	webhookURL := os.Getenv("QS_WEBHOOK_URL")
+	if cfg.WatchPath == "" {
+		cfg.WatchPath = "."
+	}
+	if cfg.IntervalSec == 0 {
+		cfg.IntervalSec = 60
+	}
 
 	s, err := scanner.New()
 	if err != nil {
-		log.Fatalf("Failed to init scanner: %v", err)
+		return err
 	}
 
 	mon, err := monitor.New(monitor.Config{
-		TargetPath:  watchPath,
-		IntervalSec: intervalSec,
-		WebhookURL:  webhookURL,
+		TargetPath:  cfg.WatchPath,
+		IntervalSec: cfg.IntervalSec,
+		WebhookURL:  cfg.WebhookURL,
 		Format:      "json",
 	})
 	if err != nil {
-		log.Fatalf("Failed to init monitor: %v", err)
+		return err
 	}
 
 	srv := &Server{
@@ -63,12 +67,8 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-
-	// Health
 	mux.HandleFunc("/health", srv.handleHealth)
 	mux.HandleFunc("/", srv.handleRoot)
-
-	// API v1
 	mux.HandleFunc("/api/v1/scan", srv.handleScan)
 	mux.HandleFunc("/api/v1/scans", srv.handleListScans)
 	mux.HandleFunc("/api/v1/monitor/status", srv.handleMonitorStatus)
@@ -79,25 +79,23 @@ func main() {
 	handler := corsMiddleware(loggingMiddleware(mux))
 
 	httpSrv := &http.Server{
-		Addr:         ":" + port,
+		Addr:         ":" + cfg.Port,
 		Handler:      handler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start background monitor
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() {
-		log.Printf("Starting background monitor on %s (interval: %ds)", watchPath, intervalSec)
+		log.Printf("Starting background monitor on %s (interval: %ds)", cfg.WatchPath, cfg.IntervalSec)
 		if err := mon.Run(ctx); err != nil {
 			log.Printf("Monitor error: %v", err)
 		}
 	}()
 
-	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -109,10 +107,11 @@ func main() {
 		httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("QuantumShield Server v%s listening on :%s", version.Version, port)
+	log.Printf("QuantumShield Server v%s listening on :%s", version.Version, cfg.Port)
 	if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
-		log.Fatalf("Server error: %v", err)
+		return err
 	}
+	return nil
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -152,19 +151,16 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
 		return
 	}
-
 	var req struct {
 		Path      string   `json:"path"`
 		Languages []string `json:"languages"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// Default scan path
 		req.Path = "."
 	}
 	if req.Path == "" {
 		req.Path = "."
 	}
-
 	result, err := s.scanner.Scan(r.Context(), scanner.ScanOptions{
 		TargetPath:  req.Path,
 		Languages:   req.Languages,
@@ -174,14 +170,12 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-
 	s.mu.Lock()
 	s.scans = append(s.scans, *result)
 	if len(s.scans) > 100 {
 		s.scans = s.scans[len(s.scans)-100:]
 	}
 	s.mu.Unlock()
-
 	writeJSON(w, http.StatusOK, result)
 }
 

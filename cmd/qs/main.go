@@ -8,6 +8,7 @@ import (
 	"quantumshield/internal/monitor"
 	"quantumshield/internal/reporter"
 	"quantumshield/internal/scanner"
+	"quantumshield/internal/server"
 	"quantumshield/internal/tui"
 	"quantumshield/pkg/version"
 )
@@ -24,6 +25,7 @@ func main() {
 
 	root.AddCommand(scanCmd())
 	root.AddCommand(monitorCmd())
+	root.AddCommand(serveCmd())
 	root.AddCommand(versionCmd())
 
 	if err := root.Execute(); err != nil {
@@ -121,7 +123,7 @@ func monitorCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "monitor [path]",
-		Short: "Continuously monitor a codebase for quantum-vulnerable crypto changes",
+		Short: "Continuously monitor a codebase for crypto changes",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := "."
@@ -133,11 +135,11 @@ func monitorCmd() *cobra.Command {
 			fmt.Fprintf(os.Stderr, "  Starting active monitor on %s (interval: %ds)\n\n", target, interval)
 
 			mon, err := monitor.New(monitor.Config{
-				TargetPath: target,
+				TargetPath:  target,
 				IntervalSec: interval,
-				WebhookURL: webhook,
-				Format:     format,
-				CIMode:     ci,
+				WebhookURL:  webhook,
+				Format:      format,
+				CIMode:      ci,
 			})
 			if err != nil {
 				return err
@@ -151,6 +153,44 @@ func monitorCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&webhook, "webhook", "w", "", "Webhook URL for alerts")
 	cmd.Flags().StringVarP(&format, "format", "f", "table", "Output format")
 	cmd.Flags().BoolVar(&ci, "ci", false, "CI mode")
+
+	return cmd
+}
+
+func serveCmd() *cobra.Command {
+	var (
+		port     string
+		watch    string
+		interval int
+		webhook  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Start the API server with background monitoring",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if envPort := os.Getenv("PORT"); envPort != "" && port == "8080" {
+				port = envPort
+			}
+			if envWatch := os.Getenv("QS_WATCH_PATH"); envWatch != "" && watch == "." {
+				watch = envWatch
+			}
+			if envWebhook := os.Getenv("QS_WEBHOOK_URL"); envWebhook != "" && webhook == "" {
+				webhook = envWebhook
+			}
+			return server.Run(server.Config{
+				Port:        port,
+				WatchPath:   watch,
+				IntervalSec: interval,
+				WebhookURL:  webhook,
+			})
+		},
+	}
+
+	cmd.Flags().StringVarP(&port, "port", "p", "8080", "Server port")
+	cmd.Flags().StringVarP(&watch, "watch", "w", ".", "Path to monitor")
+	cmd.Flags().IntVarP(&interval, "interval", "i", 60, "Monitor interval in seconds")
+	cmd.Flags().StringVar(&webhook, "webhook", "", "Webhook URL for alerts")
 
 	return cmd
 }
