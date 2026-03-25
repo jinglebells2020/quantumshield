@@ -5,3 +5,4 @@ bin/
 .env
 /qs
 /qsserver
+.github/workflows/
