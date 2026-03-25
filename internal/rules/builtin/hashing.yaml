@@ -1,0 +1,63 @@
+id: QS-MD5-001
+name: MD5 Hash Function
+description: MD5 is cryptographically broken
+severity: high
+quantum_threat: weakened_by_grover
+category: hashing
+replacement: SHA-256 or SHA-3-256
+patterns:
+  - language: go
+    type: regex
+    patterns:
+      - 'md5\.New\('
+      - 'md5\.Sum\('
+      - '"crypto/md5"'
+    message: "MD5 usage detected — cryptographically broken, replace with SHA-256"
+  - language: python
+    type: regex
+    patterns:
+      - "hashlib\\.md5\\("
+      - 'MD5\.new\('
+    message: "MD5 in Python — replace with SHA-256"
+  - language: javascript
+    type: regex
+    patterns:
+      - "crypto\\.createHash\\(['\"]md5['\"]\\)"
+    message: "MD5 in Node.js — replace with SHA-256"
+  - language: java
+    type: regex
+    patterns:
+      - 'MessageDigest\.getInstance\("MD5"\)'
+    message: "MD5 in Java — replace with SHA-256"
+---
+id: QS-SHA1-001
+name: SHA-1 Hash Function
+description: SHA-1 is deprecated with known collision attacks
+severity: high
+quantum_threat: weakened_by_grover
+category: hashing
+replacement: SHA-256 or SHA-3-256
+patterns:
+  - language: go
+    type: regex
+    patterns:
+      - 'sha1\.New\('
+      - 'sha1\.Sum\('
+      - '"crypto/sha1"'
+    message: "SHA-1 usage detected — deprecated, replace with SHA-256"
+  - language: python
+    type: regex
+    patterns:
+      - "hashlib\\.sha1\\("
+      - 'SHA1\.new\('
+    message: "SHA-1 in Python — replace with SHA-256"
+  - language: javascript
+    type: regex
+    patterns:
+      - "crypto\\.createHash\\(['\"]sha1['\"]\\)"
+    message: "SHA-1 in Node.js — replace with SHA-256"
+  - language: java
+    type: regex
+    patterns:
+      - 'MessageDigest\.getInstance\("SHA-1"\)'
+    message: "SHA-1 in Java — replace with SHA-256"

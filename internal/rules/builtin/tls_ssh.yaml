@@ -1,0 +1,50 @@
+id: QS-TLS-001
+name: Quantum-Vulnerable TLS Configuration
+description: TLS cipher suites using RSA/ECDHE key exchange
+severity: high
+quantum_threat: broken_by_shor
+category: tls_cipher_suite
+replacement: TLS 1.3 with hybrid PQ key exchange (X25519+ML-KEM-768)
+patterns:
+  - language: go
+    type: regex
+    patterns:
+      - 'tls\.TLS_RSA_WITH_'
+      - 'tls\.TLS_ECDHE_'
+      - 'tls\.VersionTLS10'
+      - 'tls\.VersionTLS11'
+      - '"crypto/tls"'
+    message: "TLS configuration using quantum-vulnerable cipher suites or key exchange"
+  - language: config
+    type: regex
+    patterns:
+      - 'ssl_ciphers.*(?:RSA|ECDHE)'
+      - 'ssl_protocols.*TLSv1\.[012]'
+      - 'SSLCipherSuite.*(?:RSA|ECDHE)'
+      - 'SSLProtocol.*TLSv1\.[012]'
+    message: "Server TLS configuration using quantum-vulnerable ciphers"
+---
+id: QS-SSH-001
+name: Quantum-Vulnerable SSH Configuration
+description: SSH using RSA/ECDSA host keys or DH/ECDH key exchange
+severity: high
+quantum_threat: broken_by_shor
+category: ssh
+replacement: SSH with PQ-safe key exchange and host keys
+patterns:
+  - language: config
+    type: regex
+    patterns:
+      - 'KexAlgorithms.*(?:ecdh|diffie-hellman)'
+      - 'HostKeyAlgorithms.*(?:ecdsa|rsa)'
+      - 'PubkeyAcceptedAlgorithms.*(?:ecdsa|rsa)'
+      - 'HostKey.*/ssh_host_rsa_key'
+      - 'HostKey.*/ssh_host_ecdsa_key'
+    message: "SSH configuration using quantum-vulnerable algorithms"
+  - language: python
+    type: regex
+    patterns:
+      - 'paramiko\.RSAKey'
+      - 'paramiko\.ECDSAKey'
+      - 'paramiko\.Transport\('
+    message: "Paramiko SSH using quantum-vulnerable keys"

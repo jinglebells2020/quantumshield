@@ -1,0 +1,55 @@
+id: QS-RSA-001
+name: RSA Key Generation and Usage
+description: Detects RSA usage vulnerable to Shor's algorithm
+severity: critical
+quantum_threat: broken_by_shor
+category: asymmetric_encryption
+replacement: ML-KEM-768 (encryption) or ML-DSA-65 (signing)
+compliance:
+  - framework: CNSA 2.0
+    requirement: "Transition to quantum-resistant algorithms by 2030"
+    status: non-compliant
+  - framework: NSM-10
+    requirement: "Inventory all quantum-vulnerable systems"
+    status: at-risk
+patterns:
+  - language: go
+    type: regex
+    patterns:
+      - 'rsa\.GenerateKey'
+      - 'rsa\.EncryptOAEP'
+      - 'rsa\.EncryptPKCS1v15'
+      - 'rsa\.DecryptOAEP'
+      - 'rsa\.DecryptPKCS1v15'
+      - 'rsa\.SignPSS'
+      - 'rsa\.SignPKCS1v15'
+      - '"crypto/rsa"'
+    message: "RSA usage detected via crypto/rsa — vulnerable to quantum attack via Shor's algorithm"
+  - language: python
+    type: regex
+    patterns:
+      - 'RSA\.generate\('
+      - 'PKCS1_OAEP\.new\('
+      - 'PKCS1_v1_5\.new\('
+      - 'rsa\.generate_private_key\('
+      - 'from Crypto\.PublicKey import RSA'
+      - 'from cryptography\.hazmat\.primitives\.asymmetric import rsa'
+    message: "RSA usage detected in Python — vulnerable to quantum attack"
+  - language: javascript
+    type: regex
+    patterns:
+      - "crypto\\.generateKeyPairSync\\(['\"]rsa['\"]"
+      - "crypto\\.generateKeyPair\\(['\"]rsa['\"]"
+      - 'crypto\.publicEncrypt\('
+      - 'crypto\.privateDecrypt\('
+      - 'forge\.pki\.rsa\.generateKeyPair'
+      - 'new NodeRSA\('
+    message: "RSA usage detected in Node.js — vulnerable to quantum attack"
+  - language: java
+    type: regex
+    patterns:
+      - 'KeyPairGenerator\.getInstance\("RSA"\)'
+      - 'Cipher\.getInstance\("RSA'
+      - 'Signature\.getInstance\(".*withRSA"\)'
+      - 'KeyFactory\.getInstance\("RSA"\)'
+    message: "RSA usage detected in Java — vulnerable to quantum attack"

@@ -1,0 +1,75 @@
+id: QS-AES128-001
+name: AES-128 Usage
+description: AES-128 provides only 64-bit quantum security via Grover's algorithm
+severity: medium
+quantum_threat: weakened_by_grover
+category: symmetric_encryption
+replacement: AES-256
+patterns:
+  - language: go
+    type: regex
+    patterns:
+      - 'aes\.NewCipher\('
+      - 'cipher\.NewGCM\('
+      - 'cipher\.NewCBCEncrypter\('
+      - 'cipher\.NewCBCDecrypter\('
+    message: "AES usage detected — verify key size is 256-bit for quantum resistance"
+  - language: python
+    type: regex
+    patterns:
+      - 'AES\.new\('
+      - 'algorithms\.AES\('
+      - 'Fernet\('
+    message: "AES usage in Python — verify 256-bit keys for quantum resistance"
+  - language: javascript
+    type: regex
+    patterns:
+      - "crypto\\.createCipheriv\\(['\"]aes-128"
+      - "crypto\\.createDecipheriv\\(['\"]aes-128"
+    message: "AES-128 in Node.js — upgrade to AES-256 for quantum resistance"
+---
+id: QS-3DES-001
+name: Triple DES Usage
+description: 3DES is weak and provides minimal quantum security
+severity: high
+quantum_threat: weakened_by_grover
+category: symmetric_encryption
+replacement: AES-256
+patterns:
+  - language: go
+    type: regex
+    patterns:
+      - 'des\.NewTripleDESCipher\('
+      - '"crypto/des"'
+    message: "3DES usage detected — replace with AES-256"
+  - language: python
+    type: regex
+    patterns:
+      - 'DES3\.new\('
+      - 'algorithms\.TripleDES\('
+    message: "3DES in Python — replace with AES-256"
+  - language: javascript
+    type: regex
+    patterns:
+      - "crypto\\.createCipheriv\\(['\"]des-ede3"
+    message: "3DES in Node.js — replace with AES-256"
+---
+id: QS-RC4-001
+name: RC4 Stream Cipher
+description: RC4 is broken and must be replaced immediately
+severity: critical
+quantum_threat: weakened_by_grover
+category: symmetric_encryption
+replacement: AES-256-GCM
+patterns:
+  - language: go
+    type: regex
+    patterns:
+      - 'rc4\.NewCipher\('
+      - '"crypto/rc4"'
+    message: "RC4 usage detected — critically broken, replace with AES-256-GCM"
+  - language: python
+    type: regex
+    patterns:
+      - 'ARC4\.new\('
+    message: "RC4 in Python — replace with AES-256-GCM"

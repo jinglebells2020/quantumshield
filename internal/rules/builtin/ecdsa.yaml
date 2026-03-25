@@ -1,0 +1,49 @@
+id: QS-ECDSA-001
+name: ECDSA Digital Signature
+description: Detects ECDSA signatures vulnerable to Shor's algorithm
+severity: critical
+quantum_threat: broken_by_shor
+category: digital_signature
+replacement: ML-DSA-65 (Dilithium) or SLH-DSA-SHA2-128s (SPHINCS+)
+compliance:
+  - framework: CNSA 2.0
+    requirement: "Replace ECDSA with quantum-resistant signature schemes"
+    status: non-compliant
+patterns:
+  - language: go
+    type: regex
+    patterns:
+      - 'ecdsa\.GenerateKey'
+      - 'ecdsa\.Sign'
+      - 'ecdsa\.SignASN1'
+      - 'ecdsa\.Verify'
+      - 'ecdsa\.VerifyASN1'
+      - '"crypto/ecdsa"'
+      - 'elliptic\.P256\('
+      - 'elliptic\.P384\('
+      - 'elliptic\.P521\('
+    message: "ECDSA/elliptic curve usage — vulnerable to Shor's algorithm"
+  - language: python
+    type: regex
+    patterns:
+      - 'ec\.generate_private_key\('
+      - 'ec\.ECDSA\('
+      - 'ec\.SECP256R1'
+      - 'ec\.SECP384R1'
+      - 'from cryptography\.hazmat\.primitives\.asymmetric import ec'
+    message: "ECDSA usage in Python — vulnerable to quantum attack"
+  - language: javascript
+    type: regex
+    patterns:
+      - "crypto\\.generateKeyPairSync\\(['\"]ec['\"]"
+      - "crypto\\.createSign\\("
+      - "crypto\\.createVerify\\("
+      - "crypto\\.sign\\(['\"]"
+    message: "ECDSA usage in Node.js — vulnerable to quantum attack"
+  - language: java
+    type: regex
+    patterns:
+      - 'KeyPairGenerator\.getInstance\("EC"\)'
+      - 'Signature\.getInstance\(".*withECDSA"\)'
+      - 'ECGenParameterSpec'
+    message: "ECDSA usage in Java — vulnerable to quantum attack"

@@ -1,0 +1,37 @@
+id: QS-ECDH-001
+name: ECDH Key Exchange
+description: Detects ECDH key exchange vulnerable to Shor's algorithm
+severity: critical
+quantum_threat: broken_by_shor
+category: key_exchange
+replacement: ML-KEM-768 or hybrid X25519+ML-KEM-768
+patterns:
+  - language: go
+    type: regex
+    patterns:
+      - 'ecdh\.P256\('
+      - 'ecdh\.P384\('
+      - 'ecdh\.P521\('
+      - 'ecdh\.X25519\('
+      - '"crypto/ecdh"'
+      - 'elliptic\.Marshal\('
+      - 'elliptic\.Unmarshal\('
+      - 'ScalarMult\('
+      - 'ScalarBaseMult\('
+    message: "ECDH key exchange detected — vulnerable to Shor's algorithm"
+  - language: python
+    type: regex
+    patterns:
+      - 'ec\.ECDH\('
+      - 'X25519PrivateKey\.generate\('
+      - 'X25519PublicKey'
+      - 'from cryptography\.hazmat\.primitives\.asymmetric\.x25519'
+    message: "ECDH/X25519 key exchange in Python — vulnerable to quantum attack"
+  - language: javascript
+    type: regex
+    patterns:
+      - "crypto\\.createDiffieHellmanGroup\\("
+      - "crypto\\.createDiffieHellman\\("
+      - "crypto\\.createECDH\\("
+      - "crypto\\.diffieHellman\\("
+    message: "DH/ECDH key exchange in Node.js — vulnerable to quantum attack"
