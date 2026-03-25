@@ -27,8 +27,8 @@ patterns:
   - language: java
     type: regex
     patterns:
-      - 'MessageDigest\.getInstance\("MD5"\)'
-      - 'MessageDigest\.getInstance\("MD2"\)'
+      - 'MessageDigest\.getInstance\("MD5"'
+      - 'MessageDigest\.getInstance\("MD2"'
     message: "MD5/MD2 in Java — replace with SHA-256"
 ---
 id: QS-SHA1-001
@@ -60,6 +60,6 @@ patterns:
   - language: java
     type: regex
     patterns:
-      - 'MessageDigest\.getInstance\("SHA-1"\)'
-      - 'MessageDigest\.getInstance\("SHA1"\)'
+      - 'MessageDigest\.getInstance\("SHA-1"'
+      - 'MessageDigest\.getInstance\("SHA1"'
     message: "SHA-1 in Java — replace with SHA-256"
