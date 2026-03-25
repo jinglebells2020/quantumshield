@@ -1,0 +1,11 @@
+{
+  "project_id": "kubernetes",
+  "scans": [
+    {"id": "s1", "summary": {"quantum_readiness": 5, "risk_score": 95, "total_findings": 633}},
+    {"id": "s2", "summary": {"quantum_readiness": 7, "risk_score": 93, "total_findings": 620}},
+    {"id": "s3", "summary": {"quantum_readiness": 8, "risk_score": 92, "total_findings": 615}},
+    {"id": "s4", "summary": {"quantum_readiness": 10, "risk_score": 90, "total_findings": 600}},
+    {"id": "s5", "summary": {"quantum_readiness": 12, "risk_score": 88, "total_findings": 590}},
+    {"id": "s6", "summary": {"quantum_readiness": 15, "risk_score": 85, "total_findings": 570}}
+  ]
+}

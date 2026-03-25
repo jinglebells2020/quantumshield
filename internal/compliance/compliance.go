@@ -17,11 +17,12 @@ const (
 	FrameworkNSM10  Framework = "NSM-10"
 	FrameworkEUPQC  Framework = "EU PQC"
 	FrameworkPCIDSS Framework = "PCI DSS 4.0"
+	FrameworkHIPAA  Framework = "HIPAA"
 )
 
 // AllFrameworks returns every supported framework.
 func AllFrameworks() []Framework {
-	return []Framework{FrameworkCNSA2, FrameworkNSM10, FrameworkEUPQC, FrameworkPCIDSS}
+	return []Framework{FrameworkCNSA2, FrameworkNSM10, FrameworkEUPQC, FrameworkPCIDSS, FrameworkHIPAA}
 }
 
 // ParseFramework converts a string to a Framework, or returns an error.
@@ -35,10 +36,12 @@ func ParseFramework(s string) (Framework, error) {
 		return FrameworkEUPQC, nil
 	case "pcidss", "pci dss", "pci-dss", "pci dss 4.0":
 		return FrameworkPCIDSS, nil
+	case "hipaa":
+		return FrameworkHIPAA, nil
 	case "all", "":
 		return "", nil // empty means all
 	default:
-		return "", fmt.Errorf("unknown framework %q; valid: cnsa2, nsm-10, eu-pqc, pci-dss", s)
+		return "", fmt.Errorf("unknown framework %q; valid: cnsa2, nsm-10, eu-pqc, pci-dss, hipaa", s)
 	}
 }
 
@@ -214,6 +217,29 @@ func pcidssRequirements() []Requirement {
 	}
 }
 
+func hipaaRequirements() []Requirement {
+	return []Requirement{
+		{
+			ID:          "HIPAA-ENC-01",
+			Framework:   FrameworkHIPAA,
+			Description: "Encryption of ePHI at rest with strong algorithms (AES-256 or equivalent)",
+			Deadline:    time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			ID:          "HIPAA-ENC-02",
+			Framework:   FrameworkHIPAA,
+			Description: "Encryption of ePHI in transit using TLS 1.2+ with strong cipher suites",
+			Deadline:    time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			ID:          "HIPAA-KEY-01",
+			Framework:   FrameworkHIPAA,
+			Description: "Cryptographic key management and rotation for ePHI protection",
+			Deadline:    time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+		},
+	}
+}
+
 // ---------- finding classification helpers ----------
 
 // vulnAlgorithms maps algorithm substrings to the requirement IDs they violate.
@@ -298,6 +324,8 @@ func GenerateReport(findings []models.Finding, framework Framework) *ComplianceR
 		reqs = evaluateEUPQC(findings)
 	case FrameworkPCIDSS:
 		reqs = evaluatePCIDSS(findings)
+	case FrameworkHIPAA:
+		reqs = evaluateHIPAA(findings)
 	default:
 		return &ComplianceReport{
 			Framework:   framework,
@@ -653,6 +681,60 @@ func evaluatePCIDSS(findings []models.Finding) []Requirement {
 			reqs[i].Status = "compliant"
 			reqs[i].Actions = []string{
 				"Maintain certificate and key inventory with QuantumShield CBOM",
+			}
+		}
+	}
+
+	return reqs
+}
+
+func evaluateHIPAA(findings []models.Finding) []Requirement {
+	reqs := hipaaRequirements()
+
+	for i := range reqs {
+		switch reqs[i].ID {
+		case "HIPAA-ENC-01":
+			n := countMatchingFindings(findings, symWeakKeywords)
+			n += countMatchingFindings(findings, hashWeakKeywords)
+			reqs[i].Findings = n
+			if n > 0 {
+				reqs[i].Status = "non-compliant"
+				reqs[i].Actions = []string{
+					"Replace weak symmetric ciphers (DES, 3DES, RC4) with AES-256 for ePHI at rest",
+					"Replace MD5/SHA-1 with SHA-256 or stronger for integrity verification",
+					"Ensure all database encryption uses AES-256 or equivalent",
+				}
+			} else {
+				reqs[i].Status = "compliant"
+			}
+
+		case "HIPAA-ENC-02":
+			n := countMatchingFindings(findings, tlsWeakKeywords)
+			n += countByCategory(findings, models.CategoryTLSCipherSuite)
+			reqs[i].Findings = n
+			if n > 0 {
+				reqs[i].Status = "non-compliant"
+				reqs[i].Actions = []string{
+					"Enforce TLS 1.2+ for all ePHI transmission",
+					"Disable TLS 1.0/1.1 and SSLv3 on all endpoints handling ePHI",
+					"Configure strong cipher suites with forward secrecy",
+				}
+			} else {
+				reqs[i].Status = "compliant"
+			}
+
+		case "HIPAA-KEY-01":
+			n := countByCategory(findings, models.CategoryKMS)
+			reqs[i].Findings = n
+			if n > 0 {
+				reqs[i].Status = "non-compliant"
+				reqs[i].Actions = []string{
+					"Implement automated key rotation for ePHI encryption keys",
+					"Use HSMs or managed KMS services for key storage",
+					"Document key management procedures and access controls",
+				}
+			} else {
+				reqs[i].Status = "compliant"
 			}
 		}
 	}
