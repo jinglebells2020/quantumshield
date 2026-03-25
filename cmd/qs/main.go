@@ -8,6 +8,7 @@ import (
 	"quantumshield/internal/monitor"
 	"quantumshield/internal/reporter"
 	"quantumshield/internal/scanner"
+	"quantumshield/internal/tui"
 	"quantumshield/pkg/version"
 )
 
@@ -16,6 +17,9 @@ func main() {
 		Use:   "qs",
 		Short: "QuantumShield — quantum-safe cryptography scanner",
 		Long:  "Discover, assess, and migrate quantum-vulnerable cryptography in your codebase",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return tui.Run()
+		},
 	}
 
 	root.AddCommand(scanCmd())
